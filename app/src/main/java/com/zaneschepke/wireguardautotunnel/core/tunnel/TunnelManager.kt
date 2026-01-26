@@ -180,6 +180,10 @@ class TunnelManager(
             ioDispatcher = ioDispatcher,
         )
 
+    // Function to check if roaming is active (will be set by roaming handler)
+    @Volatile
+    private var isRoamingActive: () -> Boolean = { false }
+
     private val dynamicDnsHandler =
         DynamicDnsHandler(
             activeTunnels = activeTunnels,
@@ -187,9 +191,16 @@ class TunnelManager(
             settingsRepository = settingsRepository,
             localMessageEvents = localMessageEvents,
             handleDnsReresolve = { config -> handleDnsReresolve(config) },
+            isRoamingActive = { isRoamingActive() },
             applicationScope = applicationScope,
             ioDispatcher = ioDispatcher,
         )
+
+    fun setRoamingStateProvider(provider: () -> Boolean) {
+        isRoamingActive = provider
+    }
+
+    fun getDnsHandler(): DynamicDnsHandler = dynamicDnsHandler
 
     private val fullTunnelMonitorHandler =
         TunnelMonitorHandler(
@@ -258,9 +269,18 @@ class TunnelManager(
     }
 
     private suspend fun handleModeChangeCleanup(previousAppMode: AppMode) {
-        lifecycleManagers[previousAppMode]?.stopActiveTunnels()
+        val previousManager = lifecycleManagers[previousAppMode]
+        previousManager?.stopActiveTunnels()
+
+        // Wait for all tunnels to actually stop before switching modes
+        withTimeoutOrNull(3000L) {
+            activeTunnels.first { it.isEmpty() }
+        } ?: run {
+            Timber.w("Mode change cleanup timed out waiting for tunnels to stop")
+        }
+
         if (previousAppMode == AppMode.LOCK_DOWN) {
-            lifecycleManagers[previousAppMode]?.setBackendMode(BackendMode.Inactive)
+            previousManager?.setBackendMode(BackendMode.Inactive)
         }
     }
 

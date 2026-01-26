@@ -4,6 +4,7 @@ import android.content.Context
 import android.os.PowerManager
 import com.zaneschepke.networkmonitor.NetworkMonitor
 import com.zaneschepke.wireguardautotunnel.core.tunnel.TunnelManager
+import com.zaneschepke.wireguardautotunnel.core.tunnel.handler.DynamicDnsHandler
 import com.zaneschepke.wireguardautotunnel.domain.repository.AutoTunnelSettingsRepository
 import com.zaneschepke.wireguardautotunnel.domain.state.ActiveNetwork
 import com.zaneschepke.wireguardautotunnel.domain.state.AutoTunnelState
@@ -28,7 +29,7 @@ import kotlinx.coroutines.withTimeoutOrNull
 import org.amnezia.awg.config.Config
 import timber.log.Timber
 
-/** Performance: ~1ms leak window */
+/** Optimized roaming with minimal leak window (~50-150ms during transitions) */
 class AutoTunnelRoamingHandler(
     private val context: Context,
     private val ioDispatcher: CoroutineDispatcher,
@@ -62,7 +63,10 @@ class AutoTunnelRoamingHandler(
         )
     }
 
-    fun start(scope: CoroutineScope, stateFlow: StateFlow<AutoTunnelState>) {
+    private var dnsHandler: DynamicDnsHandler? = null
+
+    fun start(scope: CoroutineScope, stateFlow: StateFlow<AutoTunnelState>, dnsHandler: DynamicDnsHandler? = null) {
+        this.dnsHandler = dnsHandler
         Timber.i("ROAMING: Handler starting...")
         roamingJob?.cancel()
         roamingJob =
@@ -213,7 +217,7 @@ class AutoTunnelRoamingHandler(
                     val blockConfig = Config.Builder().setInterface(amConfig.`interface`).build()
                     val blockTunnel =
                         originalConfig.copy(
-                            id = -1,
+                            id = BLOCK_TUNNEL_ID,
                             name = "BLOCK_${originalConfig.name}",
                             amQuick = blockConfig.toAwgQuickString(true, false),
                             wgQuick = blockConfig.toWgQuickString(true),
@@ -228,15 +232,12 @@ class AutoTunnelRoamingHandler(
 
                     tunnelManager.startTunnel(blockTunnel)
 
-                    // Small delay for kernel to finalize the swap
-                    delay(25)
-
                     // VERIFICATION: Is BLOCK actually active?
                     val blockActive =
-                        withTimeoutOrNull(200L) {
+                        withTimeoutOrNull(100L) {
                             tunnelManager.activeTunnels.first { tunnels ->
                                 // Check if BLOCK (ID=-1) is active
-                                tunnels.keys.contains(-1)
+                                tunnels.keys.contains(BLOCK_TUNNEL_ID)
                             }
                             true
                         } ?: false
@@ -252,7 +253,7 @@ class AutoTunnelRoamingHandler(
                         withTimeoutOrNull(1000L) {
                             tunnelManager.activeTunnels.first { it.isEmpty() }
                         }
-                        delay(60)
+                        delay(40)
                         tunnelManager.startTunnel(blockTunnel)
                         val fallbackDuration = System.currentTimeMillis() - phase1Start
                         Timber.d("ROAMING: BLOCK active via fallback (${fallbackDuration}ms total)")
@@ -289,7 +290,7 @@ class AutoTunnelRoamingHandler(
                         Timber.d("ROAMING: Waiting for BSSID=$targetBssid detection")
 
                         val bssidDetected =
-                            withTimeoutOrNull(500L) {
+                            withTimeoutOrNull(200L) {
                                 networkMonitor.connectivityStateFlow
                                     .map { it.toDomain().activeNetwork }
                                     .drop(1) // Skip current state
@@ -303,12 +304,12 @@ class AutoTunnelRoamingHandler(
                         if (bssidDetected) {
                             Timber.d("ROAMING: BSSID detected ✓")
                         } else {
-                            Timber.w("ROAMING: BSSID not detected after 500ms (continuing anyway)")
+                            Timber.w("ROAMING: BSSID not detected after 200ms (continuing anyway)")
                         }
                     }
 
                     // Final safety delay for route stability
-                    delay(60)
+                    delay(30)
                     val totalPhase2 = System.currentTimeMillis() - phase2Start
                     Timber.i("ROAMING: Network ready in ${totalPhase2}ms")
 
@@ -339,7 +340,7 @@ class AutoTunnelRoamingHandler(
 
                         val blockStillActive =
                             activeTunnelsMap.keys.any { id ->
-                                id < 0 ||
+                                id == BLOCK_TUNNEL_ID ||
                                     allTunnels.any { tunnel ->
                                         tunnel.id == id && tunnel.name.startsWith("BLOCK_")
                                     }
@@ -384,6 +385,8 @@ class AutoTunnelRoamingHandler(
 
                     if (swapSuccessful) {
                         Timber.i("ROAMING: ✓ Successfully completed")
+                        // Trigger immediate DNS recheck if handler is available
+                        dnsHandler?.triggerRecheck(originalConfig.id)
                     } else {
                         Timber.e("ROAMING: ✗ Completed but verification failed")
                     }
@@ -407,7 +410,7 @@ class AutoTunnelRoamingHandler(
     private suspend fun stopTunnelAndWait() {
         tunnelManager.stopActiveTunnels()
         withTimeoutOrNull(1000L) { tunnelManager.activeTunnels.first { it.isEmpty() } }
-        delay(60)
+        delay(30)
     }
 
     /**
@@ -469,4 +472,8 @@ class AutoTunnelRoamingHandler(
                 }
             }
         }
+
+    companion object {
+        const val BLOCK_TUNNEL_ID = -1
+    }
 }

@@ -100,6 +100,9 @@ class AutoTunnelService : LifecycleService() {
     fun start() {
         launchWatcherNotification()
 
+        // Setup roaming state coordination with DNS handler
+        tunnelManager.setRoamingStateProvider { roamingHandler.isRoamingActive }
+
         // Start Main Logic
         autoTunnelJob?.cancel()
         autoTunnelJob = startAutoTunnelStateJob()
@@ -109,7 +112,7 @@ class AutoTunnelService : LifecycleService() {
         permissionsJob = startLocationPermissionsNotificationJob()
 
         // Start Roaming Handler (Delegated)
-        roamingHandler.start(lifecycleScope, autoTunnelStateFlow)
+        roamingHandler.start(lifecycleScope, autoTunnelStateFlow, tunnelManager.getDnsHandler())
     }
 
     fun stop() {
