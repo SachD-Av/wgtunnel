@@ -203,7 +203,9 @@ class AutoTunnelRoamingHandler(
                 val startTime = System.currentTimeMillis()
 
                 try {
-                    wakeLock.acquire(10000L)
+                    // Acquire wake lock for 30s to cover entire roaming procedure
+                    // Prevents CPU sleep during critical network operations
+                    wakeLock.acquire(30000L)
 
                     val activeId = state.activeTunnels.keys.firstOrNull()
                     val originalConfig =
@@ -384,15 +386,47 @@ class AutoTunnelRoamingHandler(
                     }
 
                     if (swapSuccessful) {
-                        Timber.i("ROAMING: ✓ Successfully completed")
-                        // Trigger immediate DNS recheck if handler is available
-                        dnsHandler?.triggerRecheck(originalConfig.id)
+                        Timber.i("ROAMING: ✓ Swap successful, verifying handshake...")
+
+                        // Wait for WireGuard handshake to complete (critical for screen-off mode)
+                        // Without this, tunnel shows "UP" but has no actual connection
+                        delay(2000)
+
+                        val handshakeVerified = tunnelManager.activeTunnels.value[originalConfig.id]?.let { tunnelState ->
+                            // Check if tunnel is truly connected (not just "UP")
+                            val isHealthy = tunnelState.status == com.zaneschepke.wireguardautotunnel.domain.enums.TunnelStatus.Up
+                            if (isHealthy) {
+                                Timber.i("ROAMING: ✓ Handshake verified, tunnel healthy")
+                                true
+                            } else {
+                                Timber.w("ROAMING: ✗ Tunnel UP but not healthy, status=${tunnelState.status}")
+                                false
+                            }
+                        } ?: false
+
+                        if (handshakeVerified) {
+                            Timber.i("ROAMING: ✓ Successfully completed")
+                            // Trigger immediate DNS recheck if handler is available
+                            dnsHandler?.triggerRecheck(originalConfig.id)
+                        } else {
+                            Timber.w("ROAMING: Handshake failed, forcing tunnel restart...")
+                            tunnelManager.stopActiveTunnels()
+                            delay(500)
+                            tunnelManager.startTunnel(originalConfig)
+                            delay(2000) // Wait for handshake again
+                            Timber.i("ROAMING: Tunnel restarted after handshake failure")
+                        }
                     } else {
                         Timber.e("ROAMING: ✗ Completed but verification failed")
                     }
                 } catch (e: Exception) {
                     Timber.e(e, "ROAMING: ✗ Failed with exception")
                     try {
+                        // Ensure wake lock is still held during cleanup
+                        if (!wakeLock.isHeld) {
+                            Timber.w("ROAMING: Wake lock expired during procedure, reacquiring...")
+                            wakeLock.acquire(5000L)
+                        }
                         stopTunnelAndWait()
                     } catch (cleanupError: Exception) {
                         Timber.e(cleanupError, "ROAMING: Cleanup error")
@@ -400,9 +434,13 @@ class AutoTunnelRoamingHandler(
                 } finally {
                     _isRoamingActive.set(false)
                     currentRoamingContext = null
-                    if (wakeLock.isHeld) wakeLock.release()
                     val duration = System.currentTimeMillis() - startTime
-                    Timber.i("ROAMING: Total procedure duration: ${duration}ms")
+                    if (wakeLock.isHeld) {
+                        wakeLock.release()
+                        Timber.i("ROAMING: Total procedure duration: ${duration}ms (wake lock released)")
+                    } else {
+                        Timber.w("ROAMING: Total procedure duration: ${duration}ms (wake lock was already released!)")
+                    }
                 }
             }
         }
