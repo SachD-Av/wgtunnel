@@ -394,7 +394,7 @@ class AutoTunnelRoamingHandler(
 
                         val handshakeVerified = tunnelManager.activeTunnels.value[originalConfig.id]?.let { tunnelState ->
                             // Check if tunnel is truly connected (not just "UP")
-                            val isHealthy = tunnelState.status == com.zaneschepke.wireguardautotunnel.domain.enums.TunnelStatus.Up
+                            val isHealthy = tunnelState.status is com.zaneschepke.wireguardautotunnel.domain.enums.TunnelStatus.Up
                             if (isHealthy) {
                                 Timber.i("ROAMING: ✓ Handshake verified, tunnel healthy")
                                 true
