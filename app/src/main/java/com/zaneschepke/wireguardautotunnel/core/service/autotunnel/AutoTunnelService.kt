@@ -122,6 +122,7 @@ class AutoTunnelService : LifecycleService() {
     override fun onDestroy() {
         serviceManager.handleAutoTunnelServiceDestroy()
         roamingHandler.stop()
+        tunnelManager.setRoamingStateProvider { false }
         ServiceCompat.stopForeground(this, ServiceCompat.STOP_FOREGROUND_REMOVE)
         super.onDestroy()
     }

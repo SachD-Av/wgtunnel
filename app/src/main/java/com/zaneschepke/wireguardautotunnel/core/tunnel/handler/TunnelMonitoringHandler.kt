@@ -59,6 +59,7 @@ class TunnelMonitorHandler(
     private val logReader: LogReader,
     private val powerManager: PowerManager,
     private val getStatistics: (Int) -> TunnelStatistics?,
+    private val updateResolvedEndpoints: (Int, TunnelStatistics?) -> Unit,
     private val updateTunnelStatus:
         suspend (
             Int, TunnelStatus?, TunnelStatistics?, Map<String, PingState>?, LogHealthState?,
@@ -363,6 +364,7 @@ class TunnelMonitorHandler(
             ensureActive()
             if (!powerManager.isDeviceIdleMode) {
                 val stats = getStatistics(tunnelId)
+                updateResolvedEndpoints(tunnelId, stats)
                 ensureActive()
                 updateTunnelStatus(tunnelId, null, stats, null, null)
             }

@@ -25,9 +25,13 @@ import com.zaneschepke.wireguardautotunnel.domain.repository.MonitoringSettingsR
 import com.zaneschepke.wireguardautotunnel.domain.repository.TunnelRepository
 import com.zaneschepke.wireguardautotunnel.domain.state.LogHealthState
 import com.zaneschepke.wireguardautotunnel.domain.state.PingState
+import com.zaneschepke.wireguardautotunnel.domain.state.ActiveNetwork
 import com.zaneschepke.wireguardautotunnel.domain.state.TunnelState
 import com.zaneschepke.wireguardautotunnel.domain.state.TunnelStatistics
 import com.zaneschepke.wireguardautotunnel.util.network.NetworkUtils
+import com.zaneschepke.wireguardautotunnel.util.extensions.isValidIpv4orIpv6Address
+import com.zaneschepke.wireguardautotunnel.domain.state.toDomain
+import org.amnezia.awg.config.InetEndpoint
 import kotlin.concurrent.atomics.AtomicBoolean
 import kotlin.concurrent.atomics.AtomicReference
 import kotlin.concurrent.atomics.ExperimentalAtomicApi
@@ -53,6 +57,7 @@ import kotlinx.coroutines.plus
 import kotlinx.coroutines.supervisorScope
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
+import java.util.concurrent.ConcurrentHashMap
 import timber.log.Timber
 
 @OptIn(ExperimentalCoroutinesApi::class, ExperimentalAtomicApi::class)
@@ -60,7 +65,7 @@ class TunnelManager(
     kernelBackend: TunnelBackend,
     userspaceBackend: TunnelBackend,
     proxyUserspaceBackend: TunnelBackend,
-    networkMonitor: NetworkMonitor,
+    private val networkMonitor: NetworkMonitor,
     networkUtils: NetworkUtils,
     powerManager: PowerManager,
     logReader: LogReader,
@@ -113,14 +118,26 @@ class TunnelManager(
         return lifecycleManagers[currentAppMode.load()] ?: defaultManager
     }
 
-    override suspend fun startTunnel(tunnelConfig: TunnelConfig): Result<Unit> =
-        getProvider().startTunnel(tunnelConfig)
+    override suspend fun startTunnel(tunnelConfig: TunnelConfig): Result<Unit> {
+        seedCachedDnsEndpoints(tunnelConfig)
+        return getProvider().startTunnel(tunnelConfig)
+    }
 
-    override suspend fun stopTunnel(tunnelId: Int) = getProvider().stopTunnel(tunnelId)
+    override suspend fun stopTunnel(tunnelId: Int) {
+        getProvider().stopTunnel(tunnelId)
+        cachedResolvedEndpoints.remove(tunnelId)
+    }
 
-    override suspend fun forceStopTunnel(tunnelId: Int) = getProvider().forceStopTunnel(tunnelId)
+    override suspend fun forceStopTunnel(tunnelId: Int) {
+        getProvider().forceStopTunnel(tunnelId)
+        cachedResolvedEndpoints.remove(tunnelId)
+    }
 
-    override suspend fun stopActiveTunnels() = getProvider().stopActiveTunnels()
+    override suspend fun stopActiveTunnels() {
+        val activeIds = activeTunnels.value.keys.toSet()
+        getProvider().stopActiveTunnels()
+        activeIds.forEach { cachedResolvedEndpoints.remove(it) }
+    }
 
     override fun setBackendMode(backendMode: BackendMode) =
         getProvider().setBackendMode(backendMode)
@@ -215,6 +232,7 @@ class TunnelManager(
             powerManager = powerManager,
             logReader = logReader,
             getStatistics = { id -> getStatistics(id) },
+            updateResolvedEndpoints = { id, stats -> updateCachedDnsEndpoints(id, stats) },
             updateTunnelStatus = { id, status, stats, pings, logHealth ->
                 updateTunnelStatus(id, status, stats, pings, logHealth)
             },
@@ -222,7 +240,36 @@ class TunnelManager(
             ioDispatcher = ioDispatcher,
         )
 
+    private val cachedResolvedEndpoints =
+        ConcurrentHashMap<Int, ConcurrentHashMap<String, String>>()
+
     init {
+        applicationScope.launch(ioDispatcher) {
+            var lastSsid: String? = null
+            networkMonitor.connectivityStateFlow.collect { state ->
+                when (val activeNetwork = state.toDomain().activeNetwork) {
+                    is ActiveNetwork.Wifi -> {
+                        if (lastSsid != null && activeNetwork.ssid != lastSsid) {
+                            clearCachedDnsEndpoints()
+                        }
+                        lastSsid = activeNetwork.ssid
+                    }
+                    else -> {
+                        clearCachedDnsEndpoints()
+                        lastSsid = null
+                    }
+                }
+            }
+        }
+        applicationScope.launch(ioDispatcher) {
+            var previousActiveIds = emptySet<Int>()
+            activeTunnels.collect { active ->
+                val currentIds = active.keys.toSet()
+                val removedIds = previousActiveIds - currentIds
+                removedIds.forEach { cachedResolvedEndpoints.remove(it) }
+                previousActiveIds = currentIds
+            }
+        }
         applicationScope.launch(ioDispatcher) {
             val initialEmit = AtomicBoolean(true)
             settingsRepository.flow
@@ -245,6 +292,101 @@ class TunnelManager(
                     }
                 }
         }
+    }
+
+    fun applyCachedDnsForRoaming(tunnelConfig: TunnelConfig): TunnelConfig {
+        val cachedByPeer = cachedResolvedEndpoints[tunnelConfig.id] ?: return tunnelConfig
+        if (cachedByPeer.isEmpty()) return tunnelConfig
+
+        val amConfig = tunnelConfig.toAmConfig()
+        var wasUpdated = false
+
+        val updatedPeers =
+            amConfig.peers.map { peer ->
+                val key = peer.publicKey.toBase64()
+                val cachedEndpoint = cachedByPeer[key] ?: return@map peer
+
+                val parsed =
+                    runCatching { InetEndpoint.parse(cachedEndpoint) }.getOrNull()
+                        ?: return@map peer
+
+                if (!parsed.host.isValidIpv4orIpv6Address()) return@map peer
+
+                if (peer.endpoint.isPresent) {
+                    val existingHost = peer.endpoint.get().host
+                    if (existingHost.isValidIpv4orIpv6Address()) return@map peer
+                }
+
+                wasUpdated = true
+                copyPeerWithEndpoint(peer, cachedEndpoint)
+            }
+
+        if (!wasUpdated) return tunnelConfig
+
+        val updatedConfig =
+            org.amnezia.awg.config.Config.Builder()
+                .setInterface(amConfig.`interface`)
+                .addPeers(updatedPeers)
+                .build()
+
+        return tunnelConfig.copy(
+            wgQuick = updatedConfig.toWgQuickString(true),
+            amQuick = updatedConfig.toAwgQuickString(true, false),
+        )
+    }
+
+    fun clearCachedDnsEndpoints() {
+        cachedResolvedEndpoints.clear()
+    }
+
+    private fun updateCachedDnsEndpoints(tunnelId: Int, stats: TunnelStatistics?) {
+        if (stats == null) return
+        val peers = stats.getPeers()
+        if (peers.isEmpty()) return
+
+        val cache = cachedResolvedEndpoints.getOrPut(tunnelId) { ConcurrentHashMap() }
+        peers.forEach { peerKey ->
+            val resolvedEndpoint = stats.peerStats(peerKey)?.resolvedEndpoint?.trim().orEmpty()
+            if (resolvedEndpoint.isBlank()) return@forEach
+
+            val parsed = runCatching { InetEndpoint.parse(resolvedEndpoint) }.getOrNull()
+            if (parsed == null || !parsed.host.isValidIpv4orIpv6Address()) return@forEach
+
+            cache[peerKey] = resolvedEndpoint
+        }
+    }
+
+    private fun seedCachedDnsEndpoints(tunnelConfig: TunnelConfig) {
+        val amConfig = tunnelConfig.toAmConfig()
+        val cache = cachedResolvedEndpoints.getOrPut(tunnelConfig.id) { ConcurrentHashMap() }
+
+        amConfig.peers.forEach { peer ->
+            val key = peer.publicKey.toBase64()
+            if (!peer.endpoint.isPresent) return@forEach
+            val endpoint = peer.endpoint.get()
+            if (!endpoint.host.isValidIpv4orIpv6Address()) return@forEach
+            cache[key] = endpoint.toString()
+        }
+    }
+
+    private fun copyPeerWithEndpoint(
+        peer: org.amnezia.awg.config.Peer,
+        endpoint: String,
+    ): org.amnezia.awg.config.Peer {
+        return org.amnezia.awg.config.Peer.Builder()
+            .apply {
+                parsePublicKey(peer.publicKey.toBase64())
+                if (peer.preSharedKey.isPresent) {
+                    parsePreSharedKey(peer.preSharedKey.get().toBase64().trim())
+                }
+                if (peer.persistentKeepalive.isPresent) {
+                    parsePersistentKeepalive(peer.persistentKeepalive.get().toString().trim())
+                }
+                if (endpoint.isNotBlank()) parseEndpoint(endpoint.trim())
+                val allowedIps = peer.allowedIps.joinToString(", ").trim()
+                if (allowedIps.isNotBlank()) parseAllowedIPs(allowedIps)
+            }
+            .build()
     }
 
     // TODO this can crash if we haven't started foreground service yet, especially for

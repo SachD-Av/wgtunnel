@@ -41,6 +41,7 @@ class AutoTunnelRoamingHandler(
     private var roamingJob: Job? = null
     private var roamingProcedureJob: Job? = null
     private var lastBssid: String? = null
+    private var lastSsid: String? = null
     private val lastRoamingTriggerTime = AtomicLong(0L)
 
     private val _isRoamingActive = AtomicBoolean(false)
@@ -87,6 +88,7 @@ class AutoTunnelRoamingHandler(
 
                     if (initialNetwork is ActiveNetwork.Wifi) {
                         lastBssid = initialNetwork.bssid
+                        lastSsid = initialNetwork.ssid
                         Timber.d("ROAMING: Initial BSSID set to ${initialNetwork.bssid}")
                     }
 
@@ -121,6 +123,20 @@ class AutoTunnelRoamingHandler(
                 val currentBssid = activeNetwork.bssid
                 val currentSsid = activeNetwork.ssid
                 val previousBssid = lastBssid
+                val previousSsid = lastSsid
+
+                if (previousSsid != null && currentSsid != previousSsid) {
+                    if (_isRoamingActive.get()) {
+                        Timber.w(
+                            "ROAMING: Cancelled - SSID changed from $previousSsid to $currentSsid"
+                        )
+                        cancelRoaming()
+                    }
+                    lastBssid = currentBssid
+                    lastSsid = currentSsid
+                    tunnelManager.clearCachedDnsEndpoints()
+                    return
+                }
 
                 if (_isRoamingActive.get()) {
                     val context = currentRoamingContext
@@ -177,6 +193,7 @@ class AutoTunnelRoamingHandler(
                     }
                 }
                 lastBssid = currentBssid
+                lastSsid = currentSsid
             }
             else -> {
                 if (_isRoamingActive.get()) {
@@ -184,6 +201,8 @@ class AutoTunnelRoamingHandler(
                     cancelRoaming()
                 }
                 lastBssid = null
+                lastSsid = null
+                tunnelManager.clearCachedDnsEndpoints()
             }
         }
     }
@@ -330,7 +349,8 @@ class AutoTunnelRoamingHandler(
                     var swapSuccessful = false
 
                     try {
-                        tunnelManager.startTunnel(originalConfig)
+                        val cachedConfig = tunnelManager.applyCachedDnsForRoaming(originalConfig)
+                        tunnelManager.startTunnel(cachedConfig)
                         delay(50)
 
                         val activeTunnelsMap =
@@ -367,7 +387,8 @@ class AutoTunnelRoamingHandler(
                             tunnelManager.activeTunnels.first { it.isEmpty() }
                         }
                         delay(40)
-                        tunnelManager.startTunnel(originalConfig)
+                        val cachedConfig = tunnelManager.applyCachedDnsForRoaming(originalConfig)
+                        tunnelManager.startTunnel(cachedConfig)
 
                         delay(50)
                         val activeTunnelsMapAfterFallback =
@@ -412,7 +433,8 @@ class AutoTunnelRoamingHandler(
                             Timber.w("ROAMING: Handshake failed, forcing tunnel restart...")
                             tunnelManager.stopActiveTunnels()
                             delay(500)
-                            tunnelManager.startTunnel(originalConfig)
+                            val cachedConfig = tunnelManager.applyCachedDnsForRoaming(originalConfig)
+                            tunnelManager.startTunnel(cachedConfig)
                             delay(2000) // Wait for handshake again
                             Timber.i("ROAMING: Tunnel restarted after handshake failure")
                         }
