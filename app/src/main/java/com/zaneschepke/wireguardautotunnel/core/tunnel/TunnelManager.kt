@@ -218,6 +218,8 @@ class TunnelManager(
             networkMonitor = networkMonitor,
             powerManager = powerManager,
             handleDnsReresolve = { config -> handleDnsReresolve(config) },
+            getStatistics = { id -> getStatistics(id) },
+            restartTunnel = { id -> restartActiveTunnel(id) },
             applicationScope = applicationScope,
             ioDispatcher = ioDispatcher,
         )
