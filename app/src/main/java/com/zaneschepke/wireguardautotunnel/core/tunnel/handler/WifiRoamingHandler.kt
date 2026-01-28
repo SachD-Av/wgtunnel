@@ -1,5 +1,6 @@
 package com.zaneschepke.wireguardautotunnel.core.tunnel.handler
 
+import android.os.PowerManager
 import com.zaneschepke.networkmonitor.ActiveNetwork
 import com.zaneschepke.networkmonitor.NetworkMonitor
 import com.zaneschepke.wireguardautotunnel.data.model.AppMode
@@ -26,17 +27,20 @@ import timber.log.Timber
  *
  * When roaming is detected:
  * 1. The active tunnel stays UP to prevent traffic leaks.
- * 2. Endpoint IPs are re-resolved so the tunnel can reconnect through
+ * 2. A partial wakelock is acquired so the recovery runs even when
+ *    the phone is locked / in Doze.
+ * 3. Endpoint IPs are re-resolved so the tunnel can reconnect through
  *    the new access point.
- * 3. For DDNS endpoints, a cached IP is used first for instant recovery
+ * 4. For DDNS endpoints, a cached IP is used first for instant recovery
  *    (avoids DNS lookup failure during the brief transition), followed by
- *    a normal re-resolution.
+ *    a normal re-resolution with retry.
  */
 class WifiRoamingHandler(
     private val activeTunnels: StateFlow<Map<Int, TunnelState>>,
     private val tunnelsRepository: TunnelRepository,
     private val settingsRepository: GeneralSettingRepository,
     private val networkMonitor: NetworkMonitor,
+    private val powerManager: PowerManager,
     private val handleDnsReresolve: (TunnelConfig) -> Boolean,
     private val applicationScope: CoroutineScope,
     private val ioDispatcher: CoroutineDispatcher,
@@ -150,6 +154,16 @@ class WifiRoamingHandler(
         }
     }
 
+    @Suppress("DEPRECATION")
+    private fun acquireWakeLock(): PowerManager.WakeLock {
+        return powerManager.newWakeLock(
+            PowerManager.PARTIAL_WAKE_LOCK,
+            WAKELOCK_TAG,
+        ).apply {
+            acquire(WAKELOCK_TIMEOUT_MS)
+        }
+    }
+
     private suspend fun onRoamingDetected() {
         val settings = settingsRepository.flow.filterNotNull().first()
         // Kernel backend handles socket rebinding natively via the kernel networking stack
@@ -165,37 +179,54 @@ class WifiRoamingHandler(
             val config = tunnelsRepository.getById(id) ?: continue
 
             applicationScope.launch(ioDispatcher) {
-                // Phase 1: Try re-resolution with cached endpoint IPs for instant recovery.
-                // During roaming the VPN tunnel is broken, so DNS through the VPN may fail.
-                // The cached IP lets us reconnect without needing DNS.
-                val cachedIps = endpointIpCache[id]
-                if (cachedIps != null && cachedIps.isNotEmpty()) {
-                    Timber.d("Roaming: using cached endpoint IPs for %s", config.name)
-                    val cachedConfig = configWithCachedIps(config, cachedIps)
-                    runCatching { handleDnsReresolve(cachedConfig) }
-                        .onSuccess { updated ->
-                            Timber.d("Roaming: cached IP re-resolve for %s, updated=%s", config.name, updated)
-                        }
-                        .onFailure { e ->
-                            Timber.w(e, "Roaming: cached IP re-resolve failed for %s", config.name)
-                        }
+                val wakeLock = acquireWakeLock()
+                try {
+                    recoverTunnel(id, config)
+                } finally {
+                    if (wakeLock.isHeld) wakeLock.release()
                 }
-
-                // Phase 2: Normal DNS re-resolution to pick up any DDNS changes.
-                // Small delay to let the new AP's network stabilize.
-                delay(RERESOLVE_DELAY_MS)
-                runCatching { handleDnsReresolve(config) }
-                    .onSuccess { updated ->
-                        Timber.d("Roaming: DNS re-resolve for %s, updated=%s", config.name, updated)
-                    }
-                    .onFailure { e ->
-                        Timber.w(e, "Roaming: DNS re-resolve failed for %s", config.name)
-                    }
-
-                // Refresh the IP cache after roaming
-                resolveAndCacheEndpoints(config)
             }
         }
+    }
+
+    /**
+     * Two-phase recovery with retry.
+     *
+     * Phase 1 – cached IP (instant, no DNS needed).
+     * Phase 2 – normal DNS re-resolution.
+     * If Phase 2 fails, retry with exponential backoff so we don't
+     * have to wait for the DynamicDnsHandler's 30 s cycle.
+     */
+    private suspend fun recoverTunnel(id: Int, config: TunnelConfig) {
+        // Phase 1: cached IP → instant socket rebind without DNS
+        val cachedIps = endpointIpCache[id]
+        if (cachedIps != null && cachedIps.isNotEmpty()) {
+            Timber.d("Roaming: using cached endpoint IPs for %s", config.name)
+            val cachedConfig = configWithCachedIps(config, cachedIps)
+            runCatching { handleDnsReresolve(cachedConfig) }
+                .onSuccess { Timber.d("Roaming: cached IP re-resolve for %s, updated=%s", config.name, it) }
+                .onFailure { Timber.w(it, "Roaming: cached IP re-resolve failed for %s", config.name) }
+        }
+
+        // Phase 2: real DNS re-resolution (with retry)
+        delay(RERESOLVE_DELAY_MS)
+        var resolved = false
+        var backoff = RETRY_BASE_DELAY_MS
+        for (attempt in 1..MAX_RETRIES) {
+            val result = runCatching { handleDnsReresolve(config) }
+            result.onSuccess {
+                Timber.d("Roaming: DNS re-resolve for %s succeeded (attempt %d), updated=%s", config.name, attempt, it)
+                resolved = true
+            }.onFailure {
+                Timber.w(it, "Roaming: DNS re-resolve for %s failed (attempt %d/%d)", config.name, attempt, MAX_RETRIES)
+            }
+            if (resolved) break
+            delay(backoff)
+            backoff = (backoff * 2).coerceAtMost(RETRY_MAX_DELAY_MS)
+        }
+
+        // Refresh the IP cache after roaming
+        resolveAndCacheEndpoints(config)
     }
 
     /**
@@ -220,6 +251,11 @@ class WifiRoamingHandler(
     private data class WifiSnapshot(val ssid: String, val bssid: String?)
 
     companion object {
+        const val WAKELOCK_TAG = "wgtunnel:wifi-roaming"
+        const val WAKELOCK_TIMEOUT_MS = 60_000L // auto-release after 60 s
         const val RERESOLVE_DELAY_MS = 2_000L
+        const val MAX_RETRIES = 4
+        const val RETRY_BASE_DELAY_MS = 3_000L
+        const val RETRY_MAX_DELAY_MS = 12_000L
     }
 }

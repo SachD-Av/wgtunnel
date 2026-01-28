@@ -216,6 +216,7 @@ class TunnelManager(
             tunnelsRepository = tunnelsRepository,
             settingsRepository = settingsRepository,
             networkMonitor = networkMonitor,
+            powerManager = powerManager,
             handleDnsReresolve = { config -> handleDnsReresolve(config) },
             applicationScope = applicationScope,
             ioDispatcher = ioDispatcher,
