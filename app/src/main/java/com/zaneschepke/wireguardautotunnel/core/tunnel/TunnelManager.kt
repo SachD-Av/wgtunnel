@@ -9,6 +9,7 @@ import com.zaneschepke.wireguardautotunnel.core.tunnel.handler.DynamicDnsHandler
 import com.zaneschepke.wireguardautotunnel.core.tunnel.handler.TunnelActiveStatePersister
 import com.zaneschepke.wireguardautotunnel.core.tunnel.handler.TunnelMonitorHandler
 import com.zaneschepke.wireguardautotunnel.core.tunnel.handler.TunnelServiceHandler
+import com.zaneschepke.wireguardautotunnel.core.tunnel.handler.WifiRoamingHandler
 import com.zaneschepke.wireguardautotunnel.data.model.AppMode
 import com.zaneschepke.wireguardautotunnel.domain.enums.BackendMode
 import com.zaneschepke.wireguardautotunnel.domain.enums.TunnelStatus
@@ -205,6 +206,17 @@ class TunnelManager(
             updateTunnelStatus = { id, status, stats, pings, logHealth ->
                 updateTunnelStatus(id, status, stats, pings, logHealth)
             },
+            applicationScope = applicationScope,
+            ioDispatcher = ioDispatcher,
+        )
+
+    private val wifiRoamingHandler =
+        WifiRoamingHandler(
+            activeTunnels = activeTunnels,
+            tunnelsRepository = tunnelsRepository,
+            settingsRepository = settingsRepository,
+            networkMonitor = networkMonitor,
+            handleDnsReresolve = { config -> handleDnsReresolve(config) },
             applicationScope = applicationScope,
             ioDispatcher = ioDispatcher,
         )
