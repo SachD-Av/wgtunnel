@@ -264,11 +264,12 @@ class WifiRoamingHandler(
             .onFailure { Timber.w(it, "Roaming: force rebind threw for %s", config.name) }
             .getOrDefault(false)
 
-        if (rebindSuccess) {
-            // Restore tunnel state in case setState(UP) callback messed it up
-            runCatching { ensureTunnelUp(id) }
-                .onFailure { Timber.w(it, "Roaming: failed to restore tunnel state for %s", config.name) }
+        // ALWAYS restore tunnel state - setState(UP) callback may emit DOWN
+        // even if forceSocketRebind throws an exception
+        runCatching { ensureTunnelUp(id) }
+            .onFailure { Timber.w(it, "Roaming: failed to restore tunnel state for %s", config.name) }
 
+        if (rebindSuccess) {
             delay(HANDSHAKE_CHECK_DELAY_MS)
             val handshakeAfterRebind = latestHandshakeEpoch(id)
             if (handshakeAfterRebind > handshakeBefore) {
