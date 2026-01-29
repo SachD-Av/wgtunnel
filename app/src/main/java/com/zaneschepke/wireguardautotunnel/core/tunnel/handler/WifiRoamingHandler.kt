@@ -210,7 +210,7 @@ class WifiRoamingHandler(
      * Three-phase recovery:
      *
      * Phase 1 – cached IP re-resolve (instant, no DNS needed).
-     * Phase 2 – force socket rebind (re-applies config without restart, zero leak).
+     * Phase 2 – force socket rebind with cached IPs (no DNS needed, zero leak).
      * Phase 3 – tunnel restart as last resort if rebind fails.
      *
      * DNS re-resolution is skipped because after roaming:
@@ -220,11 +220,17 @@ class WifiRoamingHandler(
     private suspend fun recoverTunnel(id: Int, config: TunnelConfig) {
         val handshakeBefore = latestHandshakeEpoch(id)
 
-        // Phase 1: cached IP → attempt instant socket rebind without DNS
+        // Build cached config once for all phases that need it
         val cachedIps = endpointIpCache[id]
-        if (cachedIps != null && cachedIps.isNotEmpty()) {
+        val cachedConfig = if (cachedIps != null && cachedIps.isNotEmpty()) {
+            configWithCachedIps(config, cachedIps)
+        } else {
+            null
+        }
+
+        // Phase 1: cached IP → attempt instant socket rebind without DNS
+        if (cachedConfig != null) {
             Timber.d("Roaming: using cached endpoint IPs for %s", config.name)
-            val cachedConfig = configWithCachedIps(config, cachedIps)
             runCatching { handleDnsReresolve(cachedConfig) }
                 .onSuccess { Timber.d("Roaming: cached IP re-resolve for %s, updated=%s", config.name, it) }
                 .onFailure { Timber.w(it, "Roaming: cached IP re-resolve failed for %s", config.name) }
@@ -250,10 +256,11 @@ class WifiRoamingHandler(
             return
         }
 
-        // Phase 2: force socket rebind (re-applies config, no tunnel restart)
+        // Phase 2: force socket rebind with cached IPs (no DNS needed)
         // This keeps the tunnel UP the entire time → zero leak window
-        Timber.i("Roaming: forcing socket rebind for %s", config.name)
-        val rebindSuccess = runCatching { forceSocketRebind(config) }
+        val rebindConfig = cachedConfig ?: config
+        Timber.i("Roaming: forcing socket rebind for %s (cached=%s)", config.name, cachedConfig != null)
+        val rebindSuccess = runCatching { forceSocketRebind(rebindConfig) }
             .onFailure { Timber.w(it, "Roaming: force rebind threw for %s", config.name) }
             .getOrDefault(false)
 
