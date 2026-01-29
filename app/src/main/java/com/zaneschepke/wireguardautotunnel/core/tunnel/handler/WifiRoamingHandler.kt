@@ -264,19 +264,23 @@ class WifiRoamingHandler(
             .onFailure { Timber.w(it, "Roaming: force rebind threw for %s", config.name) }
             .getOrDefault(false)
 
-        // ALWAYS restore tunnel state - setState(UP) callback may emit DOWN
-        // even if forceSocketRebind throws an exception
-        runCatching { ensureTunnelUp(id) }
-            .onFailure { Timber.w(it, "Roaming: failed to restore tunnel state for %s", config.name) }
-
         if (rebindSuccess) {
             delay(HANDSHAKE_CHECK_DELAY_MS)
+
+            // Restore tunnel state AFTER delay - backend callbacks may have set it to DOWN
+            runCatching { ensureTunnelUp(id) }
+                .onFailure { Timber.w(it, "Roaming: failed to restore tunnel state for %s", config.name) }
+
             val handshakeAfterRebind = latestHandshakeEpoch(id)
             if (handshakeAfterRebind > handshakeBefore) {
                 Timber.i("Roaming: tunnel %s recovered after force rebind", config.name)
                 resolveAndCacheEndpoints(config)
                 return
             }
+        } else {
+            // Even if rebind failed, restore state in case callbacks messed it up
+            runCatching { ensureTunnelUp(id) }
+                .onFailure { Timber.w(it, "Roaming: failed to restore tunnel state for %s", config.name) }
         }
 
         // Phase 3: restart tunnel as last resort
@@ -288,6 +292,11 @@ class WifiRoamingHandler(
                 resolveAndCacheEndpoints(config)
             }
             .onFailure { Timber.e(it, "Roaming: tunnel %s restart failed", config.name) }
+
+        // Final state restoration - ensure UI is correct after all recovery attempts
+        delay(STATE_RESTORE_DELAY_MS)
+        runCatching { ensureTunnelUp(id) }
+            .onFailure { Timber.w(it, "Roaming: final state restore failed for %s", config.name) }
     }
 
     /**
@@ -331,5 +340,6 @@ class WifiRoamingHandler(
         const val WAKELOCK_TIMEOUT_MS = 60_000L // auto-release after 60 s
         const val HANDSHAKE_CHECK_DELAY_MS = 2_000L
         const val STABILIZATION_DELAY_MS = 3_000L // debounce for network to settle
+        const val STATE_RESTORE_DELAY_MS = 500L // wait for backend callbacks to settle
     }
 }
