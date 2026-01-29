@@ -32,10 +32,10 @@ import timber.log.Timber
  *    the phone is locked / in Doze.
  * 3. For DDNS endpoints, a cached IP is used first for instant recovery
  *    (avoids DNS lookup failure during the transition).
- * 4. After a stabilization delay, if the tunnel hasn't recovered,
- *    a fast restart is performed. DNS re-resolution during roaming is
- *    unreliable (broken route / timeout), so we skip it and restart
- *    directly which guarantees socket rebinding.
+ * 4. After a stabilization delay, a force socket rebind is performed.
+ *    This re-applies the tunnel config to rebind the UDP socket to the
+ *    new network path without stopping the tunnel (zero leak window).
+ * 5. If force rebind fails, a fast restart is performed as last resort.
  */
 class WifiRoamingHandler(
     private val activeTunnels: StateFlow<Map<Int, TunnelState>>,
@@ -44,6 +44,7 @@ class WifiRoamingHandler(
     private val networkMonitor: NetworkMonitor,
     private val powerManager: PowerManager,
     private val handleDnsReresolve: (TunnelConfig) -> Boolean,
+    private val forceSocketRebind: (TunnelConfig) -> Boolean,
     private val getStatistics: (Int) -> TunnelStatistics?,
     private val restartTunnel: suspend (Int) -> Unit,
     private val applicationScope: CoroutineScope,
@@ -205,15 +206,15 @@ class WifiRoamingHandler(
     }
 
     /**
-     * Two-phase recovery:
+     * Three-phase recovery:
      *
      * Phase 1 – cached IP re-resolve (instant, no DNS needed).
-     * Phase 2 – stabilization delay then tunnel restart if not recovered.
+     * Phase 2 – force socket rebind (re-applies config without restart, zero leak).
+     * Phase 3 – tunnel restart as last resort if rebind fails.
      *
      * DNS re-resolution is skipped because after roaming:
      * - DNS likely goes through the broken VPN → timeout
      * - Even if DNS works, resolveDDNS won't rebind if IP is unchanged
-     * - Restart is fast and guaranteed to work
      */
     private suspend fun recoverTunnel(id: Int, config: TunnelConfig) {
         val handshakeBefore = latestHandshakeEpoch(id)
@@ -236,25 +237,38 @@ class WifiRoamingHandler(
             }
         }
 
-        // Phase 2: stabilization delay then restart
         // Wait for network to stabilize after roaming (debounce)
-        Timber.d("Roaming: waiting for network stabilization before restart")
+        Timber.d("Roaming: waiting for network stabilization")
         delay(STABILIZATION_DELAY_MS)
 
-        // Final handshake check before restart
-        val handshakeNow = latestHandshakeEpoch(id)
-        if (handshakeNow > handshakeBefore) {
+        // Check if tunnel recovered naturally during stabilization
+        val handshakeAfterStabilization = latestHandshakeEpoch(id)
+        if (handshakeAfterStabilization > handshakeBefore) {
             Timber.i("Roaming: tunnel %s recovered during stabilization", config.name)
             resolveAndCacheEndpoints(config)
             return
         }
 
-        // Restart tunnel - guaranteed to rebind socket
-        // The tunnel interface stays up until the restart completes, so the
-        // leak window is only the ~300 ms between stop and start.
-        // With Android "Always-on VPN / Block without VPN" enabled there is
-        // zero leak even during restart.
-        Timber.i("Roaming: restarting tunnel %s", config.name)
+        // Phase 2: force socket rebind (re-applies config, no tunnel restart)
+        // This keeps the tunnel UP the entire time → zero leak window
+        Timber.i("Roaming: forcing socket rebind for %s", config.name)
+        val rebindSuccess = runCatching { forceSocketRebind(config) }
+            .onFailure { Timber.w(it, "Roaming: force rebind threw for %s", config.name) }
+            .getOrDefault(false)
+
+        if (rebindSuccess) {
+            delay(HANDSHAKE_CHECK_DELAY_MS)
+            val handshakeAfterRebind = latestHandshakeEpoch(id)
+            if (handshakeAfterRebind > handshakeBefore) {
+                Timber.i("Roaming: tunnel %s recovered after force rebind", config.name)
+                resolveAndCacheEndpoints(config)
+                return
+            }
+        }
+
+        // Phase 3: restart tunnel as last resort
+        // Only reached if force rebind failed or didn't restore connectivity
+        Timber.w("Roaming: force rebind insufficient, restarting tunnel %s", config.name)
         runCatching { restartTunnel(id) }
             .onSuccess {
                 Timber.i("Roaming: tunnel %s restarted successfully", config.name)

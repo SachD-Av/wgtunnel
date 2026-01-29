@@ -179,6 +179,9 @@ class TunnelLifecycleManager(
     override fun handleDnsReresolve(tunnelConfig: TunnelConfig): Boolean =
         backend.handleDnsReresolve(tunnelConfig)
 
+    override fun forceSocketRebind(tunnelConfig: TunnelConfig): Boolean =
+        backend.forceSocketRebind(tunnelConfig)
+
     override fun getStatistics(tunnelId: Int): TunnelStatistics? = backend.getStatistics(tunnelId)
 
     companion object {

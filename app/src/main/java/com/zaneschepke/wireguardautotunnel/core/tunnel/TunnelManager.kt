@@ -131,6 +131,9 @@ class TunnelManager(
     override fun handleDnsReresolve(tunnelConfig: TunnelConfig): Boolean =
         getProvider().handleDnsReresolve(tunnelConfig)
 
+    override fun forceSocketRebind(tunnelConfig: TunnelConfig): Boolean =
+        getProvider().forceSocketRebind(tunnelConfig)
+
     override fun getStatistics(tunnelId: Int): TunnelStatistics? =
         getProvider().getStatistics(tunnelId)
 
@@ -218,6 +221,7 @@ class TunnelManager(
             networkMonitor = networkMonitor,
             powerManager = powerManager,
             handleDnsReresolve = { config -> handleDnsReresolve(config) },
+            forceSocketRebind = { config -> forceSocketRebind(config) },
             getStatistics = { id -> getStatistics(id) },
             restartTunnel = { id -> restartActiveTunnel(id) },
             applicationScope = applicationScope,
