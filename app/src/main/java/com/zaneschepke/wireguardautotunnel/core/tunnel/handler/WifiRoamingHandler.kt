@@ -44,7 +44,7 @@ class WifiRoamingHandler(
     private val networkMonitor: NetworkMonitor,
     private val powerManager: PowerManager,
     private val handleDnsReresolve: (TunnelConfig) -> Boolean,
-    private val forceSocketRebind: (TunnelConfig) -> Boolean,
+    private val forceSocketRebind: suspend (TunnelConfig) -> Boolean,
     private val getStatistics: (Int) -> TunnelStatistics?,
     private val restartTunnel: suspend (Int) -> Unit,
     private val applicationScope: CoroutineScope,

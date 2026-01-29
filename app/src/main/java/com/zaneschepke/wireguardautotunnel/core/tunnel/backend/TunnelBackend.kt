@@ -24,7 +24,7 @@ interface TunnelBackend {
      *
      * @return true if rebind was successful, false otherwise
      */
-    fun forceSocketRebind(tunnelConfig: TunnelConfig): Boolean
+    suspend fun forceSocketRebind(tunnelConfig: TunnelConfig): Boolean
 
     suspend fun runningTunnelNames(): Set<String>
 

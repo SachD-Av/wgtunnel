@@ -131,7 +131,7 @@ class TunnelManager(
     override fun handleDnsReresolve(tunnelConfig: TunnelConfig): Boolean =
         getProvider().handleDnsReresolve(tunnelConfig)
 
-    override fun forceSocketRebind(tunnelConfig: TunnelConfig): Boolean =
+    override suspend fun forceSocketRebind(tunnelConfig: TunnelConfig): Boolean =
         getProvider().forceSocketRebind(tunnelConfig)
 
     override fun getStatistics(tunnelId: Int): TunnelStatistics? =
