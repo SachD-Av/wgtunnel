@@ -224,6 +224,14 @@ class TunnelManager(
             handleDnsReresolve = { config -> handleDnsReresolve(config) },
             forceSocketRebind = { config -> forceSocketRebind(config) },
             ensureTunnelUp = { id ->
+                // Only restore if tunnel is actually running in backend
+                // This prevents restoring state for manually stopped tunnels
+                val isActuallyRunning = getStatistics(id) != null
+                if (!isActuallyRunning) {
+                    Timber.d("Roaming: tunnel $id not running in backend, skipping state restore")
+                    return@WifiRoamingHandler
+                }
+
                 // Force restore tunnel state, bypassing updateTunnelStatus check
                 // This is needed because updateTunnelStatus ignores updates for
                 // tunnels not in activeTunnels (unless status is Starting)
