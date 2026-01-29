@@ -45,6 +45,7 @@ class WifiRoamingHandler(
     private val powerManager: PowerManager,
     private val handleDnsReresolve: (TunnelConfig) -> Boolean,
     private val forceSocketRebind: suspend (TunnelConfig) -> Boolean,
+    private val ensureTunnelUp: suspend (Int) -> Unit,
     private val getStatistics: (Int) -> TunnelStatistics?,
     private val restartTunnel: suspend (Int) -> Unit,
     private val applicationScope: CoroutineScope,
@@ -257,6 +258,10 @@ class WifiRoamingHandler(
             .getOrDefault(false)
 
         if (rebindSuccess) {
+            // Restore tunnel state in case setState(UP) callback messed it up
+            runCatching { ensureTunnelUp(id) }
+                .onFailure { Timber.w(it, "Roaming: failed to restore tunnel state for %s", config.name) }
+
             delay(HANDSHAKE_CHECK_DELAY_MS)
             val handshakeAfterRebind = latestHandshakeEpoch(id)
             if (handshakeAfterRebind > handshakeBefore) {

@@ -222,6 +222,15 @@ class TunnelManager(
             powerManager = powerManager,
             handleDnsReresolve = { config -> handleDnsReresolve(config) },
             forceSocketRebind = { config -> forceSocketRebind(config) },
+            ensureTunnelUp = { id ->
+                // Restore tunnel state if it was removed from activeTunnels by setState callback
+                val currentState = activeTunnels.value[id]
+                if (currentState == null || !currentState.status.isUp()) {
+                    val startTime = (currentState?.status as? TunnelStatus.Up)?.startTime
+                        ?: System.currentTimeMillis()
+                    updateTunnelStatus(id, TunnelStatus.Up(startTime))
+                }
+            },
             getStatistics = { id -> getStatistics(id) },
             restartTunnel = { id -> restartActiveTunnel(id) },
             applicationScope = applicationScope,
