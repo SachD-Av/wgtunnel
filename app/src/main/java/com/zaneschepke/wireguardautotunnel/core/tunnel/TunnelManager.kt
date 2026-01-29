@@ -48,6 +48,7 @@ import kotlinx.coroutines.flow.filterNotNull
 import kotlinx.coroutines.flow.firstOrNull
 import kotlinx.coroutines.flow.merge
 import kotlinx.coroutines.flow.shareIn
+import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.plus
 import kotlinx.coroutines.supervisorScope
@@ -223,12 +224,22 @@ class TunnelManager(
             handleDnsReresolve = { config -> handleDnsReresolve(config) },
             forceSocketRebind = { config -> forceSocketRebind(config) },
             ensureTunnelUp = { id ->
-                // Restore tunnel state if it was removed from activeTunnels by setState callback
-                val currentState = activeTunnels.value[id]
-                if (currentState == null || !currentState.status.isUp()) {
-                    val startTime = (currentState?.status as? TunnelStatus.Up)?.startTime
-                        ?: System.currentTimeMillis()
-                    updateTunnelStatus(id, TunnelStatus.Up(startTime))
+                // Force restore tunnel state, bypassing updateTunnelStatus check
+                // This is needed because updateTunnelStatus ignores updates for
+                // tunnels not in activeTunnels (unless status is Starting)
+                _activeTunnels.update { currentTuns ->
+                    val existingState = currentTuns[id]
+                    if (existingState != null && existingState.status.isUp()) {
+                        currentTuns // Already UP, no change needed
+                    } else {
+                        val startTime = (existingState?.status as? TunnelStatus.Up)?.startTime
+                            ?: System.currentTimeMillis()
+                        val restoredState = (existingState ?: TunnelState()).copy(
+                            status = TunnelStatus.Up(startTime)
+                        )
+                        Timber.d("Roaming: force restoring tunnel $id to activeTunnels")
+                        currentTuns + (id to restoredState)
+                    }
                 }
             },
             getStatistics = { id -> getStatistics(id) },
