@@ -255,30 +255,46 @@ class WifiRoamingHandler(
         // zero leak even during restart.
         Timber.w("Roaming: re-resolution did not restore tunnel %s, restarting", config.name)
         runCatching { restartTunnel(id) }
-            .onSuccess { Timber.i("Roaming: tunnel %s restarted successfully", config.name) }
+            .onSuccess {
+                Timber.i("Roaming: tunnel %s restarted successfully", config.name)
+                // Refresh the IP cache only after successful restart
+                resolveAndCacheEndpoints(config)
+            }
             .onFailure { Timber.e(it, "Roaming: tunnel %s restart failed", config.name) }
-
-        // Refresh the IP cache after roaming
-        resolveAndCacheEndpoints(config)
     }
 
     /**
      * Creates a copy of [tunnelConfig] where DDNS hostnames in peer
-     * endpoints are replaced with cached IP addresses. This allows
+     * Endpoint lines are replaced with cached IP addresses. This allows
      * [handleDnsReresolve] to "resolve" instantly using the known-good
      * IP from before roaming.
+     *
+     * Only replaces hostnames in "Endpoint = host:port" lines to avoid
+     * accidentally modifying DNS settings or comments.
      */
     private fun configWithCachedIps(
         tunnelConfig: TunnelConfig,
         cachedIps: Map<String, String>,
     ): TunnelConfig {
-        var amQuick = tunnelConfig.amQuick.ifBlank { tunnelConfig.wgQuick }
-        var wgQuick = tunnelConfig.wgQuick
-        for ((hostname, ip) in cachedIps) {
-            amQuick = amQuick.replace(hostname, ip)
-            wgQuick = wgQuick.replace(hostname, ip)
+        fun replaceEndpointHostnames(config: String): String {
+            return config.lines().joinToString("\n") { line ->
+                if (line.trim().startsWith("Endpoint", ignoreCase = true)) {
+                    var modifiedLine = line
+                    for ((hostname, ip) in cachedIps) {
+                        modifiedLine = modifiedLine.replace(hostname, ip)
+                    }
+                    modifiedLine
+                } else {
+                    line
+                }
+            }
         }
-        return tunnelConfig.copy(amQuick = amQuick, wgQuick = wgQuick)
+
+        val amQuick = tunnelConfig.amQuick.ifBlank { tunnelConfig.wgQuick }
+        return tunnelConfig.copy(
+            amQuick = replaceEndpointHostnames(amQuick),
+            wgQuick = replaceEndpointHostnames(tunnelConfig.wgQuick),
+        )
     }
 
     private data class WifiSnapshot(val ssid: String, val bssid: String?)
