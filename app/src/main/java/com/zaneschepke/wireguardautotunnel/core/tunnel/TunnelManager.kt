@@ -221,7 +221,6 @@ class TunnelManager(
             settingsRepository = settingsRepository,
             networkMonitor = networkMonitor,
             powerManager = powerManager,
-            handleDnsReresolve = { config -> handleDnsReresolve(config) },
             forceSocketRebind = { config -> forceSocketRebind(config) },
             ensureTunnelUp = { id ->
                 // Only restore if tunnel is actually running in backend

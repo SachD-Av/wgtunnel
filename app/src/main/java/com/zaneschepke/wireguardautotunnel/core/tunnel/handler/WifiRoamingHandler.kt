@@ -46,7 +46,6 @@ class WifiRoamingHandler(
     private val settingsRepository: GeneralSettingRepository,
     private val networkMonitor: NetworkMonitor,
     private val powerManager: PowerManager,
-    private val handleDnsReresolve: (TunnelConfig) -> Boolean,
     private val forceSocketRebind: suspend (TunnelConfig) -> Boolean,
     private val ensureTunnelUp: suspend (Int) -> Unit,
     private val getStatistics: (Int) -> TunnelStatistics?,
@@ -234,84 +233,56 @@ class WifiRoamingHandler(
     }
 
     /**
-     * Three-phase recovery:
+     * Two-phase recovery:
      *
-     * Phase 1 – cached IP re-resolve (instant, no DNS needed).
-     * Phase 2 – force socket rebind with cached IPs (no DNS needed, zero leak).
-     * Phase 3 – tunnel restart as last resort if rebind fails.
+     * Phase 1 – force socket rebind (zero leak, keeps tunnel UP).
+     * Phase 2 – tunnel restart as last resort if rebind fails.
      *
-     * DNS re-resolution is skipped because after roaming:
-     * - DNS likely goes through the broken VPN → timeout
-     * - Even if DNS works, resolveDDNS won't rebind if IP is unchanged
+     * Uses cached IPs for DDNS endpoints to avoid DNS resolution through
+     * the broken VPN. For static IP endpoints, uses config directly.
      */
     private suspend fun recoverTunnel(id: Int, config: TunnelConfig) {
         val handshakeBefore = latestHandshakeEpoch(id)
 
-        // Build cached config once for all phases that need it
+        // Use cached IPs for DDNS (avoids DNS through broken VPN), or original config for static IP
         val cachedIps = endpointIpCache[id]
-        val cachedConfig = if (cachedIps != null && cachedIps.isNotEmpty()) {
+        val rebindConfig = if (cachedIps != null && cachedIps.isNotEmpty()) {
+            Timber.d("Roaming: using cached endpoint IPs for %s", config.name)
             configWithCachedIps(config, cachedIps)
         } else {
-            null
+            config
         }
 
-        // Phase 1: cached IP → attempt instant socket rebind without DNS
-        if (cachedConfig != null) {
-            Timber.d("Roaming: using cached endpoint IPs for %s", config.name)
-            runCatching { handleDnsReresolve(cachedConfig) }
-                .onSuccess { Timber.d("Roaming: cached IP re-resolve for %s, updated=%s", config.name, it) }
-                .onFailure { Timber.w(it, "Roaming: cached IP re-resolve failed for %s", config.name) }
-
-            // Brief wait to check if cached IP recovery worked
-            delay(HANDSHAKE_CHECK_DELAY_MS)
-            val handshakeAfterCache = latestHandshakeEpoch(id)
-            if (handshakeAfterCache > handshakeBefore) {
-                Timber.i("Roaming: tunnel %s recovered with cached IP", config.name)
-                return
-            }
-        }
-
-        // Phase 2: force socket rebind with cached IPs (no DNS needed)
-        // This keeps the tunnel UP the entire time → zero leak window
-        val rebindConfig = cachedConfig ?: config
-        Timber.i("Roaming: forcing socket rebind for %s (cached=%s)", config.name, cachedConfig != null)
+        // Phase 1: force socket rebind - keeps tunnel UP (zero leak)
+        Timber.i("Roaming: forcing socket rebind for %s", config.name)
         val rebindSuccess = runCatching { forceSocketRebind(rebindConfig) }
-            .onFailure { Timber.w(it, "Roaming: force rebind threw for %s", config.name) }
+            .onFailure { Timber.w(it, "Roaming: force rebind failed for %s", config.name) }
             .getOrDefault(false)
 
         if (rebindSuccess) {
             delay(HANDSHAKE_CHECK_DELAY_MS)
-
-            // Restore tunnel state AFTER delay - backend callbacks may have set it to DOWN
             runCatching { ensureTunnelUp(id) }
-                .onFailure { Timber.w(it, "Roaming: failed to restore tunnel state for %s", config.name) }
 
             val handshakeAfterRebind = latestHandshakeEpoch(id)
             if (handshakeAfterRebind > handshakeBefore) {
-                Timber.i("Roaming: tunnel %s recovered after force rebind", config.name)
+                Timber.i("Roaming: tunnel %s recovered", config.name)
                 resolveAndCacheEndpoints(config)
                 return
             }
-        } else {
-            // Even if rebind failed, restore state in case callbacks messed it up
-            runCatching { ensureTunnelUp(id) }
-                .onFailure { Timber.w(it, "Roaming: failed to restore tunnel state for %s", config.name) }
         }
 
-        // Phase 3: restart tunnel as last resort
-        // Only reached if force rebind failed or didn't restore connectivity
-        Timber.w("Roaming: force rebind insufficient, restarting tunnel %s", config.name)
+        // Phase 2: restart tunnel as last resort
+        Timber.w("Roaming: rebind insufficient, restarting tunnel %s", config.name)
         runCatching { restartTunnel(id) }
             .onSuccess {
-                Timber.i("Roaming: tunnel %s restarted successfully", config.name)
+                Timber.i("Roaming: tunnel %s restarted", config.name)
                 resolveAndCacheEndpoints(config)
             }
             .onFailure { Timber.e(it, "Roaming: tunnel %s restart failed", config.name) }
 
-        // Final state restoration - ensure UI is correct after all recovery attempts
+        // Final state restoration
         delay(STATE_RESTORE_DELAY_MS)
         runCatching { ensureTunnelUp(id) }
-            .onFailure { Timber.w(it, "Roaming: final state restore failed for %s", config.name) }
     }
 
     /**
