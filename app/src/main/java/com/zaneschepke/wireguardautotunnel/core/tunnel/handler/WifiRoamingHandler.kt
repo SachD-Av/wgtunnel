@@ -91,9 +91,10 @@ class WifiRoamingHandler(
             .distinctUntilChanged()
             .collect { snapshot ->
                 if (snapshot == null) {
-                    // Not on WiFi: reset tracking
+                    // Not on WiFi: reset tracking and cancel any pending recovery
                     lastBssid = null
                     lastSsid = null
+                    cancelPendingRecovery()
                     return@collect
                 }
 
@@ -166,6 +167,20 @@ class WifiRoamingHandler(
         }
     }
 
+    /**
+     * Cancels any pending roaming recovery. Called when WiFi is lost
+     * to let AutoTunnel handle the network transition instead.
+     */
+    private fun cancelPendingRecovery() {
+        pendingRecoveryJob?.let { job ->
+            if (job.isActive) {
+                Timber.d("Roaming: WiFi lost, cancelling pending recovery")
+                job.cancel()
+            }
+        }
+        pendingRecoveryJob = null
+    }
+
     @Suppress("DEPRECATION")
     private fun acquireWakeLock(): PowerManager.WakeLock {
         return powerManager.newWakeLock(
@@ -200,6 +215,13 @@ class WifiRoamingHandler(
                 if (hasPendingRecovery) {
                     Timber.d("Roaming: rapid BSSID changes, debouncing %dms", DEBOUNCE_DELAY_MS)
                     delay(DEBOUNCE_DELAY_MS)
+                }
+
+                // Verify still on WiFi (network may have changed during debounce)
+                val currentNetwork = networkMonitor.connectivityStateFlow.value.activeNetwork
+                if (currentNetwork !is ActiveNetwork.Wifi) {
+                    Timber.d("Roaming: no longer on WiFi, skipping recovery")
+                    return@launch
                 }
 
                 Timber.d("Roaming: starting recovery")
