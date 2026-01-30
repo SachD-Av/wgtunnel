@@ -101,6 +101,12 @@ class WifiRoamingHandler(
                 val currentBssid = snapshot.bssid
                 val currentSsid = snapshot.ssid
 
+                // SSID changed (different network): cancel recovery, let AutoTunnel handle
+                if (lastSsid != null && lastSsid != currentSsid) {
+                    Timber.d("SSID changed from %s to %s, cancelling roaming recovery", lastSsid, currentSsid)
+                    cancelPendingRecovery()
+                }
+
                 if (currentBssid != null &&
                     lastBssid != null &&
                     lastSsid == currentSsid &&
