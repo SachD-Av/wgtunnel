@@ -14,6 +14,7 @@ import java.net.InetAddress
 import java.util.concurrent.ConcurrentHashMap
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.distinctUntilChanged
@@ -21,6 +22,8 @@ import kotlinx.coroutines.flow.filterNotNull
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import timber.log.Timber
 
 /**
@@ -53,6 +56,10 @@ class WifiRoamingHandler(
 ) {
     // Cache: tunnel ID -> (hostname -> resolved IP)
     private val endpointIpCache = ConcurrentHashMap<Int, Map<String, String>>()
+
+    // Debounce: pending recovery job (cancelled on new roaming event)
+    private var pendingRecoveryJob: Job? = null
+    private val recoveryMutex = Mutex()
 
     init {
         applicationScope.launch(ioDispatcher) {
@@ -181,13 +188,30 @@ class WifiRoamingHandler(
         val activeTunnelIds = activeTunnels.value.filter { it.value.status.isUp() }.keys
         if (activeTunnelIds.isEmpty()) return
 
-        for (id in activeTunnelIds) {
-            val config = tunnelsRepository.getById(id) ?: continue
+        // Cancel any pending recovery and start a new debounced one
+        // This ensures rapid BSSID changes (A→B→C→D) only trigger ONE recovery
+        // after the BSSID stabilizes, keeping CPU usage minimal
+        recoveryMutex.withLock {
+            pendingRecoveryJob?.cancel()
+            Timber.d("Roaming: cancelled pending recovery, starting debounce")
 
-            applicationScope.launch(ioDispatcher) {
+            pendingRecoveryJob = applicationScope.launch(ioDispatcher) {
+                // Debounce: wait for BSSID to stabilize before recovering
+                // If another roaming event occurs, this job gets cancelled
+                delay(DEBOUNCE_DELAY_MS)
+
+                Timber.d("Roaming: BSSID stabilized, starting recovery")
                 val wakeLock = acquireWakeLock()
                 try {
-                    recoverTunnel(id, config)
+                    // Re-check active tunnels after debounce (state may have changed)
+                    val currentActiveTunnels = activeTunnels.value
+                        .filter { it.value.status.isUp() }
+                        .keys
+
+                    for (id in currentActiveTunnels) {
+                        val config = tunnelsRepository.getById(id) ?: continue
+                        recoverTunnel(id, config)
+                    }
                 } finally {
                     if (wakeLock.isHeld) wakeLock.release()
                 }
@@ -338,8 +362,9 @@ class WifiRoamingHandler(
     companion object {
         const val WAKELOCK_TAG = "wgtunnel:wifi-roaming"
         const val WAKELOCK_TIMEOUT_MS = 60_000L // auto-release after 60 s
-        const val HANDSHAKE_CHECK_DELAY_MS = 2_000L
-        const val STABILIZATION_DELAY_MS = 3_000L // debounce for network to settle
+        const val DEBOUNCE_DELAY_MS = 2_000L // wait for BSSID to stabilize before recovery
+        const val HANDSHAKE_CHECK_DELAY_MS = 1_500L // check if handshake succeeded
+        const val STABILIZATION_DELAY_MS = 1_500L // network path settling after debounce
         const val STATE_RESTORE_DELAY_MS = 500L // wait for backend callbacks to settle
     }
 }
