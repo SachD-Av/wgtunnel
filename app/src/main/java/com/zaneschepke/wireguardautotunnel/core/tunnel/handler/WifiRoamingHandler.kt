@@ -100,24 +100,30 @@ class WifiRoamingHandler(
 
                 val currentBssid = snapshot.bssid
                 val currentSsid = snapshot.ssid
+                val previousBssid = lastBssid
+                val previousSsid = lastSsid
 
                 // SSID changed (different network): cancel recovery, let AutoTunnel handle
-                if (lastSsid != null && lastSsid != currentSsid) {
-                    Timber.d("SSID changed from %s to %s, cancelling roaming recovery", lastSsid, currentSsid)
+                if (previousSsid != null && previousSsid != currentSsid) {
+                    Timber.d(
+                        "SSID changed from %s to %s, cancelling roaming recovery",
+                        previousSsid,
+                        currentSsid,
+                    )
                     cancelPendingRecovery()
                 }
 
                 if (currentBssid != null &&
-                    lastBssid != null &&
-                    lastSsid == currentSsid &&
-                    lastBssid != currentBssid &&
+                    previousBssid != null &&
+                    previousSsid == currentSsid &&
+                    previousBssid != currentBssid &&
                     isValidBssid(currentBssid) &&
-                    isValidBssid(lastBssid)
+                    isValidBssid(previousBssid)
                 ) {
                     Timber.i(
                         "WiFi roaming detected: SSID=%s, BSSID %s -> %s",
                         currentSsid,
-                        lastBssid,
+                        previousBssid,
                         currentBssid,
                     )
                     onRoamingDetected()
@@ -226,7 +232,7 @@ class WifiRoamingHandler(
                 }
 
                 // Verify still on WiFi (network may have changed during debounce)
-                val currentNetwork = networkMonitor.connectivityStateFlow.value.activeNetwork
+                val currentNetwork = networkMonitor.connectivityStateFlow.first().activeNetwork
                 if (currentNetwork !is ActiveNetwork.Wifi) {
                     Timber.d("Roaming: no longer on WiFi, skipping recovery")
                     return@launch
