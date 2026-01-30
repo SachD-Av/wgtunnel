@@ -104,7 +104,9 @@ class WifiRoamingHandler(
                 if (currentBssid != null &&
                     lastBssid != null &&
                     lastSsid == currentSsid &&
-                    lastBssid != currentBssid
+                    lastBssid != currentBssid &&
+                    isValidBssid(currentBssid) &&
+                    isValidBssid(lastBssid)
                 ) {
                     Timber.i(
                         "WiFi roaming detected: SSID=%s, BSSID %s -> %s",
@@ -343,7 +345,24 @@ class WifiRoamingHandler(
 
     private data class WifiSnapshot(val ssid: String, val bssid: String?)
 
+    /**
+     * Validates that a BSSID is real and not a placeholder.
+     * Some devices return fake BSSIDs when location permission is missing.
+     */
+    private fun isValidBssid(bssid: String): Boolean {
+        return bssid.isNotBlank() &&
+            bssid !in INVALID_BSSIDS &&
+            bssid.matches(BSSID_PATTERN)
+    }
+
     companion object {
+        // Placeholder BSSIDs returned when location permission is missing or unavailable
+        private val INVALID_BSSIDS = setOf(
+            "02:00:00:00:00:00", // Common placeholder
+            "00:00:00:00:00:00", // Null BSSID
+            "ff:ff:ff:ff:ff:ff", // Broadcast address
+        )
+        private val BSSID_PATTERN = Regex("^([0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}$")
         const val WAKELOCK_TAG = "wgtunnel:wifi-roaming"
         const val WAKELOCK_TIMEOUT_MS = 60_000L // auto-release after 60 s
         const val DEBOUNCE_DELAY_MS = 2_000L // wait for BSSID to stabilize (rapid roaming only)
