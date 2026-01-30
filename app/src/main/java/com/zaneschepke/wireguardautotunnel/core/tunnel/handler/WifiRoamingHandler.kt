@@ -188,22 +188,25 @@ class WifiRoamingHandler(
         val activeTunnelIds = activeTunnels.value.filter { it.value.status.isUp() }.keys
         if (activeTunnelIds.isEmpty()) return
 
-        // Cancel any pending recovery and start a new debounced one
+        // Debounce: first roaming = immediate, subsequent = wait for stabilization
         // This ensures rapid BSSID changes (A→B→C→D) only trigger ONE recovery
-        // after the BSSID stabilizes, keeping CPU usage minimal
+        // after the BSSID stabilizes, while single roaming recovers instantly
         recoveryMutex.withLock {
+            val hasPendingRecovery = pendingRecoveryJob?.isActive == true
             pendingRecoveryJob?.cancel()
-            Timber.d("Roaming: cancelled pending recovery, starting debounce")
 
             pendingRecoveryJob = applicationScope.launch(ioDispatcher) {
-                // Debounce: wait for BSSID to stabilize before recovering
-                // If another roaming event occurs, this job gets cancelled
-                delay(DEBOUNCE_DELAY_MS)
+                // First roaming = immediate recovery (might be the only one)
+                // Subsequent roaming = debounce to wait for BSSID stability
+                if (hasPendingRecovery) {
+                    Timber.d("Roaming: rapid BSSID changes, debouncing %dms", DEBOUNCE_DELAY_MS)
+                    delay(DEBOUNCE_DELAY_MS)
+                }
 
-                Timber.d("Roaming: BSSID stabilized, starting recovery")
+                Timber.d("Roaming: starting recovery")
                 val wakeLock = acquireWakeLock()
                 try {
-                    // Re-check active tunnels after debounce (state may have changed)
+                    // Re-check active tunnels (state may have changed during debounce)
                     val currentActiveTunnels = activeTunnels.value
                         .filter { it.value.status.isUp() }
                         .keys
@@ -266,18 +269,6 @@ class WifiRoamingHandler(
                 Timber.i("Roaming: tunnel %s recovered with cached IP", config.name)
                 return
             }
-        }
-
-        // Wait for network to stabilize after roaming (debounce)
-        Timber.d("Roaming: waiting for network stabilization")
-        delay(STABILIZATION_DELAY_MS)
-
-        // Check if tunnel recovered naturally during stabilization
-        val handshakeAfterStabilization = latestHandshakeEpoch(id)
-        if (handshakeAfterStabilization > handshakeBefore) {
-            Timber.i("Roaming: tunnel %s recovered during stabilization", config.name)
-            resolveAndCacheEndpoints(config)
-            return
         }
 
         // Phase 2: force socket rebind with cached IPs (no DNS needed)
@@ -362,9 +353,8 @@ class WifiRoamingHandler(
     companion object {
         const val WAKELOCK_TAG = "wgtunnel:wifi-roaming"
         const val WAKELOCK_TIMEOUT_MS = 60_000L // auto-release after 60 s
-        const val DEBOUNCE_DELAY_MS = 2_000L // wait for BSSID to stabilize before recovery
+        const val DEBOUNCE_DELAY_MS = 2_000L // wait for BSSID to stabilize (rapid roaming only)
         const val HANDSHAKE_CHECK_DELAY_MS = 1_500L // check if handshake succeeded
-        const val STABILIZATION_DELAY_MS = 1_500L // network path settling after debounce
         const val STATE_RESTORE_DELAY_MS = 500L // wait for backend callbacks to settle
     }
 }
