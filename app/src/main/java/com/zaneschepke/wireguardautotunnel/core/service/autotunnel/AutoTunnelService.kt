@@ -434,8 +434,7 @@ class AutoTunnelService : LifecycleService() {
                     }
             ) {
                 is AutoTunnelEvent.Start -> {
-                    val tunnelConfig =
-                        event.tunnelConfig ?: tunnelsRepository.getDefaultTunnel()
+                    val tunnelConfig = event.tunnelConfig ?: tunnelsRepository.getDefaultTunnel()
                     if (
                         tunnelConfig != null &&
                             !autoTunnelStateFlow.value.settings.isAutoReactivateEnabled &&
