@@ -127,6 +127,10 @@ class AutoTunnelViewModel(
         autoTunnelRepository.upsert(state.autoTunnelSettings.copy(debounceDelaySeconds = to))
     }
 
+    fun setAutoReactivateEnabled(to: Boolean) = intent {
+        autoTunnelRepository.upsert(state.autoTunnelSettings.copy(isAutoReactivateEnabled = to))
+    }
+
     fun setPreferredMobileDataTunnel(tunnel: TunnelConfig?) = intent {
         tunnelsRepository.updateMobileDataTunnel(tunnel)
     }

@@ -78,6 +78,18 @@ class AutoTunnelService : LifecycleService() {
     private var permissionsJob: Job? = null
     private var autoTunnelFailoverJob: Job? = null
 
+    // Tracks when auto-tunnel itself requests a stop, so ActiveTunnelsChange
+    // doesn't re-trigger event handling for its own stop request.
+    @Volatile private var autoTunnelStopInProgress = false
+
+    // Tracks whether the current tunnel change was initiated by auto-tunnel (Start or Stop).
+    // When false and tunnels change, the change is considered manual by the user.
+    @Volatile private var autoTunnelActionInProgress = false
+
+    // Set of tunnel IDs that the user manually stopped.
+    // Auto-tunnel skips starting these until the user manually re-enables them.
+    private val manuallySuppressedTunnelIds = mutableSetOf<Int>()
+
     class LocalBinder(service: AutoTunnelService) : Binder() {
         private val serviceRef = WeakReference(service)
 
@@ -106,6 +118,9 @@ class AutoTunnelService : LifecycleService() {
 
     fun start() {
         launchWatcherNotification()
+        autoTunnelStopInProgress = false
+        autoTunnelActionInProgress = false
+        manuallySuppressedTunnelIds.clear()
         autoTunnelJob?.cancel()
         autoTunnelJob = startAutoTunnelStateJob()
         permissionsJob?.cancel()
@@ -162,7 +177,8 @@ class AutoTunnelService : LifecycleService() {
                     SettingsChange(appMode, settings, tunnels)
                 }
 
-            val tunnelsFlow = tunnelManager.activeTunnels.map(::ActiveTunnelsChange)
+            val tunnelsFlow =
+                tunnelManager.activeTunnels.map(::ActiveTunnelsChange).distinctUntilChanged()
 
             var reevaluationJob: Job? = null
 
@@ -219,12 +235,58 @@ class AutoTunnelService : LifecycleService() {
                         }
                     }
                     is ActiveTunnelsChange -> {
+                        val previousActiveIds = autoTunnelStateFlow.value.activeTunnels.keys
+                        val currentActiveIds = change.activeTunnels.keys
                         autoTunnelStateFlow.update { it.copy(activeTunnels = change.activeTunnels) }
+
+                        // Track manual stops/starts for the auto-reactivate feature.
+                        // When auto-reactivate is disabled, manually stopped tunnels
+                        // stay off until the user re-enables them.
+                        if (
+                            !autoTunnelStateFlow.value.settings.isAutoReactivateEnabled &&
+                                !autoTunnelActionInProgress
+                        ) {
+                            val stoppedIds = previousActiveIds - currentActiveIds
+                            val startedIds = currentActiveIds - previousActiveIds
+                            if (stoppedIds.isNotEmpty()) {
+                                manuallySuppressedTunnelIds.addAll(stoppedIds)
+                                Timber.d(
+                                    "Manually suppressed tunnels: %s",
+                                    manuallySuppressedTunnelIds,
+                                )
+                            }
+                            if (startedIds.isNotEmpty()) {
+                                manuallySuppressedTunnelIds.removeAll(startedIds)
+                                Timber.d("Unsuppressed tunnels: %s", startedIds)
+                            }
+                        }
+
+                        autoTunnelActionInProgress = false
+                        autoTunnelStopInProgress = false
+                        // ActiveTunnelsChange only keeps state in sync for future decisions.
+                        // Stats/ping updates emit frequently (~1/s) but never require tunnel
+                        // action,
+                        // so skip event handling and re-evaluation to avoid a hot loop.
                         return@collect
                     }
                 }
 
-                handleAutoTunnelEvent(autoTunnelStateFlow.value.determineAutoTunnelEvent(change))
+                val event = autoTunnelStateFlow.value.determineAutoTunnelEvent(change)
+                handleAutoTunnelEvent(event)
+
+                // When the network type changes (WiFi ↔ 4G / Ethernet) but the same
+                // tunnel stays active, clear stale health states so the monitoring
+                // shows UNKNOWN (gray) instead of a false UNHEALTHY (red) from
+                // pings that failed during the brief network transition.
+                if (
+                    change is NetworkChange &&
+                        event is AutoTunnelEvent.DoNothing &&
+                        change.networkState.hasInternet() &&
+                        previousState.networkState.activeNetwork::class !=
+                            change.networkState.activeNetwork::class
+                ) {
+                    clearStaleHealthStates()
+                }
 
                 // re-evaluate network state after a short duration to prevent missed state changes
                 reevaluationJob = launch {
@@ -355,6 +417,14 @@ class AutoTunnelService : LifecycleService() {
                 }
         }
 
+    private suspend fun clearStaleHealthStates() {
+        for ((id, state) in autoTunnelStateFlow.value.activeTunnels) {
+            if (!state.status.isUp()) continue
+            Timber.i("Network type changed, clearing stale ping states for tunnel %d", id)
+            tunnelManager.updateTunnelStatus(id, null, null, emptyMap(), null)
+        }
+    }
+
     private suspend fun handleAutoTunnelEvent(autoTunnelEvent: AutoTunnelEvent) {
         autoTunMutex.withLock {
             when (
@@ -363,14 +433,33 @@ class AutoTunnelService : LifecycleService() {
                         Timber.i("Auto tunnel event: ${it.javaClass.simpleName}")
                     }
             ) {
-                is AutoTunnelEvent.Start ->
-                    (event.tunnelConfig ?: tunnelsRepository.getDefaultTunnel())?.let {
+                is AutoTunnelEvent.Start -> {
+                    val tunnelConfig =
+                        event.tunnelConfig ?: tunnelsRepository.getDefaultTunnel()
+                    if (
+                        tunnelConfig != null &&
+                            !autoTunnelStateFlow.value.settings.isAutoReactivateEnabled &&
+                            tunnelConfig.id in manuallySuppressedTunnelIds
+                    ) {
+                        Timber.i(
+                            "Tunnel %s manually suppressed, skipping auto-start",
+                            tunnelConfig.name,
+                        )
+                        return@withLock
+                    }
+                    autoTunnelActionInProgress = true
+                    tunnelConfig?.let {
                         tunnelManager.startTunnel(it).onFailure { e ->
                             Timber.e(e, "Auto-tunnel start failed for ${it.name}")
                             // TODO notify or retry
                         }
                     }
-                is AutoTunnelEvent.Stop -> tunnelManager.stopActiveTunnels()
+                }
+                is AutoTunnelEvent.Stop -> {
+                    autoTunnelActionInProgress = true
+                    autoTunnelStopInProgress = true
+                    tunnelManager.stopActiveTunnels()
+                }
                 AutoTunnelEvent.DoNothing -> Timber.i("Auto-tunneling: nothing to do")
             }
         }

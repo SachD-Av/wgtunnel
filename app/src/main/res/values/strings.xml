@@ -411,6 +411,9 @@
     <string name="ddns_success_message">Dynamic DNS endpoint successfully updated.</string>
     <string name="reliability">Reliability</string>
     <string name="debounce_description">Delay between rapid network changes</string>
+    <string name="behavior">Behavior</string>
+    <string name="auto_reactivate">Auto-reactivate tunnels</string>
+    <string name="auto_reactivate_description">When disabled, manually stopped tunnels stay off until you re-enable them</string>
     <string name="aovpn_description">Allows Android to start tunnels</string>
     <string name="tunnel_boot_description">Start the default tunnel on boot</string>
     <string name="remote_key">Remote key</string>

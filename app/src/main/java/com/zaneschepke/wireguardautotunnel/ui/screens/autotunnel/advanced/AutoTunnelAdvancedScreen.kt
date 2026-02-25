@@ -8,6 +8,7 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.PauseCircle
+import androidx.compose.material.icons.outlined.TouchApp
 import androidx.compose.material3.Icon
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
@@ -17,6 +18,8 @@ import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.zaneschepke.wireguardautotunnel.R
+import com.zaneschepke.wireguardautotunnel.ui.common.button.SurfaceRow
+import com.zaneschepke.wireguardautotunnel.ui.common.button.ThemedSwitch
 import com.zaneschepke.wireguardautotunnel.ui.common.dropdown.LabelledDropdown
 import com.zaneschepke.wireguardautotunnel.ui.common.label.GroupLabel
 import com.zaneschepke.wireguardautotunnel.ui.common.text.DescriptionText
@@ -44,6 +47,30 @@ fun AutoTunnelAdvancedScreen(viewModel: AutoTunnelViewModel = koinViewModel()) {
                 options = (0..10).toList(),
                 currentValue = autoTunnelState.autoTunnelSettings.debounceDelaySeconds,
                 optionToString = { it?.toString() ?: stringResource(R.string._default) },
+            )
+        }
+        Column {
+            GroupLabel(
+                stringResource(R.string.behavior),
+                modifier = Modifier.padding(horizontal = 16.dp),
+            )
+            SurfaceRow(
+                leading = { Icon(Icons.Outlined.TouchApp, contentDescription = null) },
+                title = stringResource(R.string.auto_reactivate),
+                description = {
+                    DescriptionText(stringResource(R.string.auto_reactivate_description))
+                },
+                trailing = {
+                    ThemedSwitch(
+                        checked = autoTunnelState.autoTunnelSettings.isAutoReactivateEnabled,
+                        onClick = { viewModel.setAutoReactivateEnabled(it) },
+                    )
+                },
+                onClick = {
+                    viewModel.setAutoReactivateEnabled(
+                        !autoTunnelState.autoTunnelSettings.isAutoReactivateEnabled
+                    )
+                },
             )
         }
     }
