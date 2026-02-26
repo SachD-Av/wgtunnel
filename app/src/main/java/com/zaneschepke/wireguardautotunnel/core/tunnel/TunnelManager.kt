@@ -28,6 +28,7 @@ import com.zaneschepke.wireguardautotunnel.domain.state.PingState
 import com.zaneschepke.wireguardautotunnel.domain.state.TunnelState
 import com.zaneschepke.wireguardautotunnel.domain.state.TunnelStatistics
 import com.zaneschepke.wireguardautotunnel.util.network.NetworkUtils
+import java.util.Collections
 import kotlin.concurrent.atomics.AtomicBoolean
 import kotlin.concurrent.atomics.AtomicReference
 import kotlin.concurrent.atomics.ExperimentalAtomicApi
@@ -74,6 +75,22 @@ class TunnelManager(
 
     private val _activeTunnels = MutableStateFlow<Map<Int, TunnelState>>(emptyMap())
     override val activeTunnels: StateFlow<Map<Int, TunnelState>> = _activeTunnels.asStateFlow()
+
+    // Tracks tunnel IDs that were explicitly stopped by the user (UI, tile, notification).
+    // AutoTunnelService consumes these via isManualStop() to distinguish user actions from
+    // tunnel crashes or network-induced stops.
+    private val pendingManualStopIds: MutableSet<Int> = Collections.synchronizedSet(mutableSetOf())
+
+    fun markManualStop(tunnelId: Int) {
+        pendingManualStopIds.add(tunnelId)
+    }
+
+    fun markManualStopAll() {
+        pendingManualStopIds.addAll(activeTunnels.value.keys)
+    }
+
+    /** Returns true and consumes the flag if [tunnelId] was marked as a manual stop. */
+    fun isManualStop(tunnelId: Int): Boolean = pendingManualStopIds.remove(tunnelId)
 
     @OptIn(ExperimentalAtomicApi::class) val currentAppMode = AtomicReference(AppMode.VPN)
 

@@ -28,8 +28,11 @@ class NotificationActionReceiver : BroadcastReceiver(), KoinComponent {
                     autoTunnelRepository.updateAutoTunnelEnabled(false)
                 NotificationAction.TUNNEL_OFF.name -> {
                     val tunnelId = intent.getIntExtra(NotificationManager.EXTRA_ID, 0)
-                    if (tunnelId == STOP_ALL_TUNNELS_ID)
+                    if (tunnelId == STOP_ALL_TUNNELS_ID) {
+                        tunnelManager.markManualStopAll()
                         return@launch tunnelManager.stopActiveTunnels()
+                    }
+                    tunnelManager.markManualStop(tunnelId)
                     tunnelManager.stopTunnel(tunnelId)
                 }
             }

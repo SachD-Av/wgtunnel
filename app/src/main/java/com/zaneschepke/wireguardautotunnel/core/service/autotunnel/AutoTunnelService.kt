@@ -242,6 +242,10 @@ class AutoTunnelService : LifecycleService() {
                         // Track manual stops/starts for the auto-reactivate feature.
                         // When auto-reactivate is disabled, manually stopped tunnels
                         // stay off until the user re-enables them.
+                        // Only tunnels explicitly marked via TunnelManager.markManualStop()
+                        // (from UI, tile, or notification) are treated as manual stops.
+                        // Tunnel crashes or network-induced stops are not marked and are
+                        // therefore ignored here.
                         if (
                             !autoTunnelStateFlow.value.settings.isAutoReactivateEnabled &&
                                 !autoTunnelActionInProgress
@@ -249,11 +253,15 @@ class AutoTunnelService : LifecycleService() {
                             val stoppedIds = previousActiveIds - currentActiveIds
                             val startedIds = currentActiveIds - previousActiveIds
                             if (stoppedIds.isNotEmpty()) {
-                                manuallySuppressedTunnelIds.addAll(stoppedIds)
-                                Timber.d(
-                                    "Manually suppressed tunnels: %s",
-                                    manuallySuppressedTunnelIds,
-                                )
+                                val manualStops =
+                                    stoppedIds.filter { tunnelManager.isManualStop(it) }.toSet()
+                                if (manualStops.isNotEmpty()) {
+                                    manuallySuppressedTunnelIds.addAll(manualStops)
+                                    Timber.d(
+                                        "Manually suppressed tunnels: %s",
+                                        manuallySuppressedTunnelIds,
+                                    )
+                                }
                             }
                             if (startedIds.isNotEmpty()) {
                                 manuallySuppressedTunnelIds.removeAll(startedIds)

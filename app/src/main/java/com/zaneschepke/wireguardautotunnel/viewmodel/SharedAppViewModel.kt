@@ -162,6 +162,7 @@ class SharedAppViewModel(
     }
 
     fun stopTunnel(tunnelConfig: TunnelConfig) = intent {
+        tunnelManager.markManualStop(tunnelConfig.id)
         tunnelManager.stopTunnel(tunnelConfig.id)
     }
 
